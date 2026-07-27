@@ -40,6 +40,7 @@ export class VolumeMonitorService implements OnModuleInit, OnModuleDestroy {
   // Config
   private pollingIntervalMinutes: number;
   private harvestIntervalMinutes: number;
+  private cycleCooldownMinutes: number;
   private minVolumeUsd: number;
   private minSpikeMultiplier: number;
   private minReserveUsd: number;
@@ -145,6 +146,9 @@ export class VolumeMonitorService implements OnModuleInit, OnModuleDestroy {
         this.pollingIntervalMinutes,
       ),
     );
+    this.cycleCooldownMinutes = Number(
+      this.configService.get<number>('CYCLE_COOLDOWN_MINUTES', 3),
+    );
     this.minVolumeUsd = Number(
       this.configService.get<number>('MIN_VOLUME_USD', 500_000),
     );
@@ -160,6 +164,7 @@ export class VolumeMonitorService implements OnModuleInit, OnModuleDestroy {
       `Settings: Mode=${this.spikeMode.toUpperCase()} | ` +
         `Networks=[${this.networks.join(', ')}] | ` +
         `HarvestInterval=${this.harvestIntervalMinutes}m | ` +
+        `CycleCooldown=${this.cycleCooldownMinutes}m | ` +
         `MinVol=$${this.minVolumeUsd.toLocaleString()} | ` +
         `MinSpike=${this.minSpikeMultiplier}× | ` +
         `MinLiquidity=$${this.minReserveUsd.toLocaleString()}`,
@@ -381,7 +386,7 @@ export class VolumeMonitorService implements OnModuleInit, OnModuleDestroy {
           }
         }
 
-        const coolDownMins = 3;
+        const coolDownMins = this.cycleCooldownMinutes;
         this.logger.log(
           `✅ [Worker Cycle Complete] Checked ${checked}/${pools.length} pools (${alerted} alerts sent). ` +
             `Cooling down for ${coolDownMins} minutes before starting next cycle...`,
