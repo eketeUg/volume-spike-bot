@@ -1,0 +1,35 @@
+version: '3.8'
+
+services:
+  bot-daily:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: volume-spike-bot-daily
+    restart: always
+    env_file:
+      - .env.daily
+    ports:
+      - "3000:3000"
+
+  bot-weekly:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: volume-spike-bot-weekly
+    restart: always
+    env_file:
+      - .env.weekly
+    ports:
+      - "3001:3001"
+
+  bot-monthly:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: volume-spike-bot-monthly
+    restart: always
+    env_file:
+      - .env.monthly
+    ports:
+      - "3002:3002"
