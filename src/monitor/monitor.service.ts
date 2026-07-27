@@ -482,8 +482,9 @@ export class VolumeMonitorService implements OnModuleInit, OnModuleDestroy {
 
     const chatId = process.env.TELEGRAM_CHAT_ID ?? '';
     const chatId_1 = process.env.TELEGRAM_CHAT_ID_1 ?? '';
+
+    this.telegramService.sendMessage(chatId_1, msg);
     this.telegramService.sendMessage(chatId, msg);
-    // this.telegramService.sendMessage(chatId_1, msg);
 
     this.logger.log(
       `🚨 ALERT: ${name} (${chainName}) — ${spike.toFixed(1)}× | ` +
