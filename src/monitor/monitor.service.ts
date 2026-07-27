@@ -52,6 +52,9 @@ export class VolumeMonitorService implements OnModuleInit, OnModuleDestroy {
   private dexScreenerApiBaseUrl: string;
   private dexScreenerWebBaseUrl: string;
 
+  // Track single Cloudflare block admin alert flag
+  private hasNotifiedCloudflareBlock = false;
+
   // Rate-limit guard — GeckoTerminal free tier: 30 req/min
   private lastRequestAt = 0;
   private readonly MIN_REQUEST_GAP_MS = 2100;
@@ -206,9 +209,42 @@ export class VolumeMonitorService implements OnModuleInit, OnModuleDestroy {
       '🧹 [Midnight Reset] Clearing all pool baselines for the new UTC trading day...',
     );
     await this.baselineRepo.clearAllBaselines();
+    this.hasNotifiedCloudflareBlock = false;
     this.logger.log(
       '✅ [Midnight Reset] Database cleared. Harvester will populate fresh pools for today.',
     );
+  }
+
+  /**
+   * Send a single Admin Telegram alert when Cloudflare WAF (403 Forbidden) blocks the VPS IP
+   */
+  private async notifyCloudflareBlock(url: string): Promise<void> {
+    if (this.hasNotifiedCloudflareBlock) return;
+    this.hasNotifiedCloudflareBlock = true;
+
+    const adminChatId =
+      this.configService.get<string>('TELEGRAM_ADMIN_CHAT_ID') ||
+      this.configService.get<string>('TELEGRAM_CHAT_ID') ||
+      '';
+
+    if (!adminChatId) {
+      this.logger.error(
+        'No TELEGRAM_ADMIN_CHAT_ID or TELEGRAM_CHAT_ID configured for Cloudflare 403 alert.',
+      );
+      return;
+    }
+
+    const msg =
+      `⚠️ <b>[CLOUDFLARE BLOCK WARNING]</b> ⚠️\n\n` +
+      `<b>Mode:</b> ${this.spikeMode.toUpperCase()}\n` +
+      `<b>Status:</b> 403 Forbidden (Cloudflare WAF Blocked VPS IP)\n` +
+      `<b>Endpoint:</b> <code>${url}</code>\n\n` +
+      `<i>Note: This alert is sent ONLY ONCE per day to prevent Telegram spamming. Please inspect VPS IP reputation or proxy settings.</i>`;
+
+    this.logger.error(
+      `🚨 Cloudflare WAF 403 Block detected! Sending Admin alert to Telegram Chat ID: ${adminChatId}`,
+    );
+    await this.telegramService.sendMessage(adminChatId, msg);
   }
 
   // ─── Process 1: Trending Pool Harvester Cron (p1 API) ────────────────────
@@ -483,8 +519,12 @@ export class VolumeMonitorService implements OnModuleInit, OnModuleDestroy {
     const chatId = process.env.TELEGRAM_CHAT_ID ?? '';
     const chatId_1 = process.env.TELEGRAM_CHAT_ID_1 ?? '';
 
-    this.telegramService.sendMessage(chatId_1, msg);
-    this.telegramService.sendMessage(chatId, msg);
+    try {
+      this.telegramService.sendMessage(chatId_1, msg);
+      this.telegramService.sendMessage(chatId, msg);
+    } catch (error) {
+      this.logger.warn(`User yet to chat the bot`);
+    }
 
     this.logger.log(
       `🚨 ALERT: ${name} (${chainName}) — ${spike.toFixed(1)}× | ` +
@@ -550,8 +590,18 @@ export class VolumeMonitorService implements OnModuleInit, OnModuleDestroy {
         const response = await axios.get(url, {
           headers: {
             'User-Agent':
-              'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            Accept: 'application/json',
+              'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+            Accept: 'application/json, text/plain, */*',
+            'Accept-Language': 'en-US,en;q=0.9',
+            Origin: 'https://www.geckoterminal.com',
+            Referer: 'https://www.geckoterminal.com/',
+            'Sec-Ch-Ua':
+              '"Not/A)Brand";v="8", "Chromium";v="126", "Google Chrome";v="126"',
+            'Sec-Ch-Ua-Mobile': '?0',
+            'Sec-Ch-Ua-Platform': '"macOS"',
+            'Sec-Fetch-Dest': 'empty',
+            'Sec-Fetch-Mode': 'cors',
+            'Sec-Fetch-Site': 'same-site',
           },
           timeout: 10_000,
         });
@@ -561,6 +611,13 @@ export class VolumeMonitorService implements OnModuleInit, OnModuleDestroy {
           if (attempt >= maxRetries) return null;
           await this.delay(2000 * (attempt + 1));
           continue;
+        }
+        if (err.response?.status === 403) {
+          this.logger.error(
+            `403 Forbidden on ${url} — Cloudflare WAF blocked VPS IP.`,
+          );
+          await this.notifyCloudflareBlock(url);
+          return null;
         }
         this.logger.warn(`p1 API HTTP error: ${err.message}`);
         return null;
@@ -605,6 +662,7 @@ export class VolumeMonitorService implements OnModuleInit, OnModuleDestroy {
 
       const resCandles = await this.fetchP1(candleUrl);
       const candles: any[] = resCandles?.data?.data ?? [];
+
       if (!candles || candles.length === 0) return null;
 
       let todayVolume = 0;
