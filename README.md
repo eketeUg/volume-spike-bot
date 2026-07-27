@@ -1,98 +1,141 @@
-<p align="center">
-  <a href="http://nestjs.com/" target="blank"><img src="https://nestjs.com/img/logo-small.svg" width="120" alt="Nest Logo" /></a>
-</p>
+# 🚨 Volume Spike Bot
 
-[circleci-image]: https://img.shields.io/circleci/build/github/nestjs/nest/master?token=abc123def456
-[circleci-url]: https://circleci.com/gh/nestjs/nest
+High-performance DEX liquidity pool volume monitor built with **NestJS**, **MongoDB**, **GeckoTerminal `p1` API** (300 req/min limit), and **DexScreener API**.
 
-  <p align="center">A progressive <a href="http://nodejs.org" target="_blank">Node.js</a> framework for building efficient and scalable server-side applications.</p>
-    <p align="center">
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/v/@nestjs/core.svg" alt="NPM Version" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/l/@nestjs/core.svg" alt="Package License" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/dm/@nestjs/common.svg" alt="NPM Downloads" /></a>
-<a href="https://circleci.com/gh/nestjs/nest" target="_blank"><img src="https://img.shields.io/circleci/build/github/nestjs/nest/master" alt="CircleCI" /></a>
-<a href="https://discord.gg/G7Qnnhy" target="_blank"><img src="https://img.shields.io/badge/discord-online-brightgreen.svg" alt="Discord"/></a>
-<a href="https://opencollective.com/nest#backer" target="_blank"><img src="https://opencollective.com/nest/backers/badge.svg" alt="Backers on Open Collective" /></a>
-<a href="https://opencollective.com/nest#sponsor" target="_blank"><img src="https://opencollective.com/nest/sponsors/badge.svg" alt="Sponsors on Open Collective" /></a>
-  <a href="https://paypal.me/kamilmysliwiec" target="_blank"><img src="https://img.shields.io/badge/Donate-PayPal-ff3f59.svg" alt="Donate us"/></a>
-    <a href="https://opencollective.com/nest#sponsor"  target="_blank"><img src="https://img.shields.io/badge/Support%20us-Open%20Collective-41B883.svg" alt="Support us"></a>
-  <a href="https://twitter.com/nestframework" target="_blank"><img src="https://img.shields.io/twitter/follow/nestframework.svg?style=social&label=Follow" alt="Follow us on Twitter"></a>
-</p>
-  <!--[![Backers on Open Collective](https://opencollective.com/nest/backers/badge.svg)](https://opencollective.com/nest#backer)
-  [![Sponsors on Open Collective](https://opencollective.com/nest/sponsors/badge.svg)](https://opencollective.com/nest#sponsor)-->
+---
 
-## Description
+## 🌟 Key Features
 
-[Nest](https://github.com/nestjs/nest) framework TypeScript starter repository.
+* **Dual-Process Architecture**:
+  1. **🌾 Harvester Process**: Periodically scans top trending pools across networks sorted by 6-hour trend score (`-6h_trend_score`) and stores them in MongoDB.
+  2. **⚙️ Volume Worker Process**: Continuously iterates through stored pools using 1D daily candles to calculate volume spikes in real time (200ms rate-limit gap).
+* **3 Configurable Spike Modes (`Option A`)**:
+  - 📅 **`SPIKE_MODE=daily`**: Compares Today's 1D candle volume vs Yesterday's 1D candle volume.
+  - 📊 **`SPIKE_MODE=weekly`**: Compares Current Calendar Week (Mon--Today) vs Last Completed Calendar Week (Mon--Sun).
+  - 📈 **`SPIKE_MODE=monthly`**: Compares Current Calendar Month (1st--Today) vs Last Completed Calendar Month (1st--End).
+* **Multi-Chain Support**: Ethereum (`eth`), Binance Smart Chain (`bsc`), Robinhood (`robinhood`), and Solana (`solana`).
+* **Smart Alerting Gates**:
+  - Minimum volume threshold gate (`MIN_VOLUME_USD`).
+  - Minimum spike multiplier gate (`MIN_SPIKE_MULTIPLIER`).
+  - Real-time liquidity validation gate via DexScreener (`MIN_RESERVE_USD`).
+  - **Once-Per-Day Alert Rule**: Prevents Telegram alert spamming for the same token until tomorrow.
+* **Daily Midnight Reset (23:58 UTC)**: Wipes daily baselines and cooldown records so all tokens start fresh at 00:00 UTC.
 
-## Project setup
+---
 
-```bash
-$ npm install
+## 📁 Environment Configuration
+
+All settings and API endpoints are externalized and fully configurable via environment files:
+
+| Variable | Description | Default |
+| :--- | :--- | :--- |
+| `PORT` | HTTP Server Port | `3000` |
+| `SPIKE_MODE` | Calculation mode (`daily`, `weekly`, `monthly`) | `daily` |
+| `NETWORKS` | Comma-separated networks to monitor | `eth,bsc,robinhood` |
+| `HARVEST_INTERVAL_MINUTES` | Minutes between trending pool scans | `10` |
+| `CYCLE_COOLDOWN_MINUTES` | Worker pause minutes after completing a pool cycle | `3` |
+| `MIN_VOLUME_USD` | Minimum volume in USD required to trigger alert | `500000` |
+| `MIN_SPIKE_MULTIPLIER` | Minimum volume spike multiplier (e.g. `5` for 5x) | `5` |
+| `MIN_RESERVE_USD` | Minimum liquidity in USD required | `300000` |
+| `MONGODB_URI` | MongoDB Atlas / Local connection URL | Required |
+| `TELEGRAM_BOT_TOKEN` | Telegram Bot API Token | Required |
+| `TELEGRAM_CHAT_ID` | Telegram Channel / Chat ID | Required |
+| `GECKOTERMINAL_P1_BASE_URL` | GeckoTerminal `p1` API base URL | `https://app.geckoterminal.com/api/p1` |
+| `DEXSCREENER_API_BASE_URL` | DexScreener API base URL | `https://api.dexscreener.com/latest/dex/pairs` |
+| `DEXSCREENER_WEB_BASE_URL` | DexScreener web URL | `https://dexscreener.com` |
+
+---
+
+## 🚀 Running 3 Independent Instances (`Option A`)
+
+To run Daily, Weekly, and Monthly bots simultaneously, create 3 environment files:
+
+### 1. `.env.daily` (Daily Bot - Port 3000)
+```env
+PORT=3000
+SPIKE_MODE=daily
+NETWORKS=eth,bsc,robinhood
+MIN_VOLUME_USD=500000
+MIN_SPIKE_MULTIPLIER=5
+MONGODB_URI=your_mongodb_atlas_daily_uri
+TELEGRAM_BOT_TOKEN=your_bot_token
+TELEGRAM_CHAT_ID=your_daily_channel_id
 ```
 
-## Compile and run the project
-
-```bash
-# development
-$ npm run start
-
-# watch mode
-$ npm run start:dev
-
-# production mode
-$ npm run start:prod
+### 2. `.env.weekly` (Weekly Bot - Port 3001)
+```env
+PORT=3001
+SPIKE_MODE=weekly
+NETWORKS=eth,bsc,robinhood
+MIN_VOLUME_USD=1000000
+MIN_SPIKE_MULTIPLIER=3
+MONGODB_URI=your_mongodb_atlas_weekly_uri
+TELEGRAM_BOT_TOKEN=your_bot_token
+TELEGRAM_CHAT_ID=your_weekly_channel_id
 ```
 
-## Run tests
-
-```bash
-# unit tests
-$ npm run test
-
-# e2e tests
-$ npm run test:e2e
-
-# test coverage
-$ npm run test:cov
+### 3. `.env.monthly` (Monthly Bot - Port 3002)
+```env
+PORT=3002
+SPIKE_MODE=monthly
+NETWORKS=eth,bsc,robinhood
+MIN_VOLUME_USD=3000000
+MIN_SPIKE_MULTIPLIER=2
+MONGODB_URI=your_mongodb_atlas_monthly_uri
+TELEGRAM_BOT_TOKEN=your_bot_token
+TELEGRAM_CHAT_ID=your_monthly_channel_id
 ```
 
-## Deployment
+---
 
-When you're ready to deploy your NestJS application to production, there are some key steps you can take to ensure it runs as efficiently as possible. Check out the [deployment documentation](https://docs.nestjs.com/deployment) for more information.
+## 🐳 Docker Deployment (VPS)
 
-If you are looking for a cloud-based platform to deploy your NestJS application, check out [Mau](https://mau.nestjs.com), our official platform for deploying NestJS applications on AWS. Mau makes deployment straightforward and fast, requiring just a few simple steps:
+Deploy all 3 bots using **Docker Compose** on any VPS (Ubuntu/Debian/CentOS):
 
+### Step 1: Clone Repository & Create `.env` files
 ```bash
-$ npm install -g @nestjs/mau
-$ mau deploy
+git clone https://github.com/your-username/volume-spike-bot.git
+cd volume-spike-bot
+
+# Create .env.daily, .env.weekly, .env.monthly with your credentials
 ```
 
-With Mau, you can deploy your application in just a few clicks, allowing you to focus on building features rather than managing infrastructure.
+### Step 2: Launch All Containers
+```bash
+docker compose up -d --build
+```
 
-## Resources
+### Step 3: View Container Status & Live Logs
+```bash
+# View status of all running bots
+docker compose ps
 
-Check out a few resources that may come in handy when working with NestJS:
+# View live logs for all 3 bots combined
+docker compose logs -f
 
-- Visit the [NestJS Documentation](https://docs.nestjs.com) to learn more about the framework.
-- For questions and support, please visit our [Discord channel](https://discord.gg/G7Qnnhy).
-- To dive deeper and get more hands-on experience, check out our official video [courses](https://courses.nestjs.com/).
-- Deploy your application to AWS with the help of [NestJS Mau](https://mau.nestjs.com) in just a few clicks.
-- Visualize your application graph and interact with the NestJS application in real-time using [NestJS Devtools](https://devtools.nestjs.com).
-- Need help with your project (part-time to full-time)? Check out our official [enterprise support](https://enterprise.nestjs.com).
-- To stay in the loop and get updates, follow us on [X](https://x.com/nestframework) and [LinkedIn](https://linkedin.com/company/nestjs).
-- Looking for a job, or have a job to offer? Check out our official [Jobs board](https://jobs.nestjs.com).
+# View live logs for a specific bot instance
+docker compose logs -f bot-daily
+docker compose logs -f bot-weekly
+docker compose logs -f bot-monthly
+```
 
-## Support
+---
 
-Nest is an MIT-licensed open source project. It can grow thanks to the sponsors and support by the amazing backers. If you'd like to join them, please [read more here](https://docs.nestjs.com/support).
+## 🛠️ Local Development
 
-## Stay in touch
+```bash
+# Install dependencies
+npm install
 
-- Author - [Kamil Myśliwiec](https://twitter.com/kammysliwiec)
-- Website - [https://nestjs.com](https://nestjs.com/)
-- Twitter - [@nestframework](https://twitter.com/nestframework)
+# Build application
+npm run build
 
-## License
+# Start local dev server
+npm run start:dev
+```
 
-Nest is [MIT licensed](https://github.com/nestjs/nest/blob/master/LICENSE).
+---
+
+## 📜 License
+
+MIT License.
