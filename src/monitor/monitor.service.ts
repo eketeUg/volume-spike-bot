@@ -57,8 +57,9 @@ export class VolumeMonitorService implements OnModuleInit, OnModuleDestroy {
   // Track single Cloudflare block admin alert flag
   private hasNotifiedCloudflareBlock = false;
 
-  // HTTP Proxy Agent for Cloudflare bypass on VPS
-  private proxyAgent: HttpsProxyAgent<string> | null = null;
+  // HTTP Proxy Agents for Cloudflare/402 bypass on VPS
+  private proxyAgents: HttpsProxyAgent<string>[] = [];
+  private proxyIndex = 0;
 
   // Rate-limit guard — GeckoTerminal free tier: 30 req/min
   private lastRequestAt = 0;
@@ -117,11 +118,15 @@ export class VolumeMonitorService implements OnModuleInit, OnModuleDestroy {
   // ─── Lifecycle ──────────────────────────────────────────────────────────────
 
   onModuleInit() {
-    const proxyUrl = this.configService.get<string>('HTTP_PROXY');
-    if (proxyUrl) {
-      this.proxyAgent = new HttpsProxyAgent(proxyUrl);
+    const rawProxy = this.configService.get<string>('HTTP_PROXY');
+    if (rawProxy) {
+      const proxyList = rawProxy
+        .split(',')
+        .map((s) => s.trim())
+        .filter((s) => s.length > 0);
+      this.proxyAgents = proxyList.map((url) => new HttpsProxyAgent(url));
       this.logger.log(
-        `🌐 HTTP Proxy configured: ${proxyUrl.replace(/:[^:@]+@/, ':****@')}`,
+        `🌐 Configured ${this.proxyAgents.length} HTTP Proxies in rotation for Cloudflare/402 bypass.`,
       );
     }
 
@@ -166,7 +171,7 @@ export class VolumeMonitorService implements OnModuleInit, OnModuleDestroy {
       this.configService.get<number>('CYCLE_COOLDOWN_MINUTES', 3),
     );
     this.workerBatchSize = Number(
-      this.configService.get<number>('WORKER_BATCH_SIZE', 20),
+      this.configService.get<number>('WORKER_BATCH_SIZE', 1),
     );
     this.minVolumeUsd = Number(
       this.configService.get<number>('MIN_VOLUME_USD', 500_000),
@@ -351,16 +356,24 @@ export class VolumeMonitorService implements OnModuleInit, OnModuleDestroy {
           continue;
         }
 
+        const cycleStartTime = Date.now();
+        const totalPools = pools.length;
+        const totalBatches = Math.ceil(totalPools / this.workerBatchSize);
+
         this.logger.log(
-          `🔄 [Worker Cycle] Starting p1 OHLCV volume checks across ${pools.length} pools in MongoDB (Batch size: ${this.workerBatchSize} parallel calls)...`,
+          `🔄 [Worker Cycle Started] Total Pools: ${totalPools} | ` +
+            `Batches: ${totalBatches} (${this.workerBatchSize} pools/batch) | ` +
+            `Est. Duration: ~${Math.ceil(totalBatches * 2.5)}s`,
         );
         let checked = 0;
         let alerted = 0;
+        let batchIndex = 0;
 
         const poolChunks = this.chunkArray(pools, this.workerBatchSize);
 
         for (const chunk of poolChunks) {
           if (!this.isWorkerRunning) break;
+          batchIndex++;
 
           await Promise.all(
             chunk.map(async (doc) => {
@@ -437,20 +450,29 @@ export class VolumeMonitorService implements OnModuleInit, OnModuleDestroy {
             }),
           );
 
-          if (checked % 100 === 0 && checked > 0) {
-            this.logger.log(
-              `📊 Worker progress: checked ${checked}/${pools.length} pools...`,
-            );
-          }
+          const pendingPools = Math.max(0, totalPools - checked);
+          const elapsedSecs = ((Date.now() - cycleStartTime) / 1000).toFixed(
+            1,
+          );
+
+          this.logger.log(
+            `⚙️ [Worker Batch ${batchIndex}/${totalBatches}] Checked: ${checked}/${totalPools} (${pendingPools} pending) | ` +
+              `Elapsed: ${elapsedSecs}s | Alerts: ${alerted}`,
+          );
 
           // 2-second rate limit safety gap between 20-parallel batches
           await this.delay(2000);
         }
 
+        const totalCycleTimeSecs = (
+          (Date.now() - cycleStartTime) /
+          1000
+        ).toFixed(1);
         const coolDownMins = this.cycleCooldownMinutes;
+
         this.logger.log(
-          `✅ [Worker Cycle Complete] Checked ${checked}/${pools.length} pools (${alerted} alerts sent). ` +
-            `Cooling down for ${coolDownMins} minutes before starting next cycle...`,
+          `✅ [Worker Cycle Finished] Completed ${checked}/${totalPools} pools in ${totalCycleTimeSecs}s! ` +
+            `(${alerted} alerts sent). Cooling down for ${coolDownMins}m before next cycle...`,
         );
         await this.delay(coolDownMins * 60 * 1000);
       } catch (err: any) {
@@ -631,17 +653,20 @@ export class VolumeMonitorService implements OnModuleInit, OnModuleDestroy {
           timeout: 10_000,
         };
 
-        if (this.proxyAgent) {
-          reqConfig.httpsAgent = this.proxyAgent;
-          reqConfig.httpAgent = this.proxyAgent;
+        if (this.proxyAgents.length > 0) {
+          const agent =
+            this.proxyAgents[this.proxyIndex % this.proxyAgents.length];
+          this.proxyIndex++;
+          reqConfig.httpsAgent = agent;
+          reqConfig.httpAgent = agent;
         }
 
         const response = await axios.get(url, reqConfig);
         return response;
       } catch (err: any) {
-        if (err.response?.status === 429) {
+        if (err.response?.status === 429 || err.response?.status === 402) {
           if (attempt >= maxRetries) return null;
-          await this.delay(2000 * (attempt + 1));
+          await this.delay(3000 * (attempt + 1));
           continue;
         }
         if (err.response?.status === 403) {
