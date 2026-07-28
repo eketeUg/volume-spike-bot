@@ -42,6 +42,7 @@ export class VolumeMonitorService implements OnModuleInit, OnModuleDestroy {
   private pollingIntervalMinutes: number;
   private harvestIntervalMinutes: number;
   private cycleCooldownMinutes: number;
+  private workerBatchSize: number;
   private minVolumeUsd: number;
   private minSpikeMultiplier: number;
   private minReserveUsd: number;
@@ -164,6 +165,9 @@ export class VolumeMonitorService implements OnModuleInit, OnModuleDestroy {
     this.cycleCooldownMinutes = Number(
       this.configService.get<number>('CYCLE_COOLDOWN_MINUTES', 3),
     );
+    this.workerBatchSize = Number(
+      this.configService.get<number>('WORKER_BATCH_SIZE', 20),
+    );
     this.minVolumeUsd = Number(
       this.configService.get<number>('MIN_VOLUME_USD', 500_000),
     );
@@ -180,6 +184,7 @@ export class VolumeMonitorService implements OnModuleInit, OnModuleDestroy {
         `Networks=[${this.networks.join(', ')}] | ` +
         `HarvestInterval=${this.harvestIntervalMinutes}m | ` +
         `CycleCooldown=${this.cycleCooldownMinutes}m | ` +
+        `WorkerBatchSize=${this.workerBatchSize} | ` +
         `MinVol=$${this.minVolumeUsd.toLocaleString()} | ` +
         `MinSpike=${this.minSpikeMultiplier}× | ` +
         `MinLiquidity=$${this.minReserveUsd.toLocaleString()}`,
@@ -347,90 +352,99 @@ export class VolumeMonitorService implements OnModuleInit, OnModuleDestroy {
         }
 
         this.logger.log(
-          `🔄 [Worker Cycle] Starting p1 OHLCV volume checks across ${pools.length} pools in MongoDB...`,
+          `🔄 [Worker Cycle] Starting p1 OHLCV volume checks across ${pools.length} pools in MongoDB (Batch size: ${this.workerBatchSize} parallel calls)...`,
         );
         let checked = 0;
         let alerted = 0;
 
-        for (const doc of pools) {
+        const poolChunks = this.chunkArray(pools, this.workerBatchSize);
+
+        for (const chunk of poolChunks) {
           if (!this.isWorkerRunning) break;
 
-          const {
-            address,
-            network,
-            name,
-            poolId,
-            pairId,
-            baselineOhlcvVolume,
-            baselineH24,
-          } = doc;
-          if (this.isBlockedPool(name)) continue;
+          await Promise.all(
+            chunk.map(async (doc) => {
+              const {
+                address,
+                network,
+                name,
+                poolId,
+                pairId,
+                baselineOhlcvVolume,
+                baselineH24,
+              } = doc;
+              if (this.isBlockedPool(name)) return;
 
-          // Fetch today's and yesterday's OHLCV daily candles using p1 API
-          const ohlcvData = await this.fetchOhlcvP1(
-            network,
-            address,
-            poolId,
-            pairId,
+              const ohlcvData = await this.fetchOhlcvP1(
+                network,
+                address,
+                poolId,
+                pairId,
+              );
+              if (!ohlcvData) return;
+              checked++;
+
+              const todayVolume = ohlcvData.todayVolume;
+              const yesterdayVolume = ohlcvData.yesterdayVolume;
+
+              const effectiveBaseline =
+                baselineOhlcvVolume > 0
+                  ? baselineOhlcvVolume
+                  : yesterdayVolume > 0
+                    ? yesterdayVolume
+                    : baselineH24;
+
+              if (effectiveBaseline <= 0 || todayVolume <= 0) return;
+
+              const spike = todayVolume / effectiveBaseline;
+
+              this.logger.debug(
+                `[Worker OHLCV p1] ${name} (${network.toUpperCase()}) | ` +
+                  `baseline=$${Math.round(effectiveBaseline).toLocaleString()} ` +
+                  `today=$${Math.round(todayVolume).toLocaleString()} | spike=${spike.toFixed(2)}×`,
+              );
+
+              if (todayVolume < this.minVolumeUsd) return;
+
+              if (spike >= this.minSpikeMultiplier) {
+                const poolDetails = await this.fetchPoolDetails(
+                  network,
+                  address,
+                );
+                const reserveInUsd = poolDetails?.reserveInUsd ?? 0;
+                const priceUsd = poolDetails?.priceUsd ?? null;
+                const h1 = poolDetails?.h1 ?? 0;
+                const rawDexId = poolDetails?.rawDexId ?? '';
+                const tokenAddress = poolDetails?.tokenAddress ?? '';
+
+                if (reserveInUsd < this.minReserveUsd) return;
+
+                await this.triggerAlert(
+                  network,
+                  name,
+                  address,
+                  tokenAddress,
+                  rawDexId,
+                  priceUsd,
+                  reserveInUsd,
+                  h1,
+                  todayVolume,
+                  effectiveBaseline,
+                  spike,
+                );
+                alerted++;
+              }
+            }),
           );
-          if (!ohlcvData) continue;
-          checked++;
 
-          const todayVolume = ohlcvData.todayVolume;
-          const yesterdayVolume = ohlcvData.yesterdayVolume;
-
-          const effectiveBaseline =
-            baselineOhlcvVolume > 0
-              ? baselineOhlcvVolume
-              : yesterdayVolume > 0
-                ? yesterdayVolume
-                : baselineH24;
-
-          if (effectiveBaseline <= 0 || todayVolume <= 0) continue;
-
-          const spike = todayVolume / effectiveBaseline;
-
-          this.logger.debug(
-            `[Worker OHLCV p1] ${name} (${network.toUpperCase()}) | ` +
-              `baseline=$${Math.round(effectiveBaseline).toLocaleString()} ` +
-              `today=$${Math.round(todayVolume).toLocaleString()} | spike=${spike.toFixed(2)}×`,
-          );
-
-          // Log progress every 100 pools
-          if (checked % 100 === 0) {
+          if (checked % 100 === 0 && checked > 0) {
             this.logger.log(
               `📊 Worker progress: checked ${checked}/${pools.length} pools...`,
             );
           }
 
-          if (todayVolume < this.minVolumeUsd) continue;
-
-          if (spike >= this.minSpikeMultiplier) {
-            // Live liquidity and price check via DexScreener
-            const poolDetails = await this.fetchPoolDetails(network, address);
-            const reserveInUsd = poolDetails?.reserveInUsd ?? 0;
-            const priceUsd = poolDetails?.priceUsd ?? null;
-            const h1 = poolDetails?.h1 ?? 0;
-            const rawDexId = poolDetails?.rawDexId ?? '';
-            const tokenAddress = poolDetails?.tokenAddress ?? '';
-
-            if (reserveInUsd < this.minReserveUsd) continue;
-
-            await this.triggerAlert(
-              network,
-              name,
-              address,
-              tokenAddress,
-              rawDexId,
-              priceUsd,
-              reserveInUsd,
-              h1,
-              todayVolume,
-              effectiveBaseline,
-              spike,
-            );
-            alerted++;
-          }
+          // 2-second rate limit safety gap between 20-parallel batches
+          await this.delay(2000);
         }
 
         const coolDownMins = this.cycleCooldownMinutes;
