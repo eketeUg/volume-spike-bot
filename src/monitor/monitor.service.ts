@@ -50,6 +50,7 @@ export class VolumeMonitorService implements OnModuleInit, OnModuleDestroy {
   private spikeMode: 'daily' | 'weekly' | 'monthly' = 'daily';
 
   // External API & Web Base URLs (configurable from .env)
+  private geckoTerminalV2BaseUrl: string;
   private geckoTerminalP1BaseUrl: string;
   private dexScreenerApiBaseUrl: string;
   private dexScreenerWebBaseUrl: string;
@@ -126,10 +127,18 @@ export class VolumeMonitorService implements OnModuleInit, OnModuleDestroy {
         .filter((s) => s.length > 0);
       this.proxyAgents = proxyList.map((url) => new HttpsProxyAgent(url));
       this.logger.log(
-        `🌐 Configured ${this.proxyAgents.length} HTTP Proxies in rotation for Cloudflare/402 bypass.`,
+        `🌐 [Proxy Engine Active] Configured ${this.proxyAgents.length} HTTP Proxy URL(s) for Cloudflare/402 bypass.`,
+      );
+    } else {
+      this.logger.warn(
+        `⚠️ [Proxy Engine Inactive] No HTTP_PROXY found in .env — using raw VPS IP.`,
       );
     }
 
+    this.geckoTerminalV2BaseUrl = this.configService.get<string>(
+      'GECKOTERMINAL_V2_BASE_URL',
+      'https://api.geckoterminal.com/api/v2',
+    );
     this.geckoTerminalP1BaseUrl = this.configService.get<string>(
       'GECKOTERMINAL_P1_BASE_URL',
       'https://app.geckoterminal.com/api/p1',
@@ -278,15 +287,15 @@ export class VolumeMonitorService implements OnModuleInit, OnModuleDestroy {
    */
   async harvestTrendingPools(): Promise<void> {
     this.logger.log(
-      '🌾 [Harvester] Scanning live top trending pools from app.geckoterminal.com p1 API (-6h_trend_score)...',
+      '🌾 [Harvester] Scanning live top trending pools from api.geckoterminal.com v2 API...',
     );
     let totalHarvested = 0;
 
     for (const network of this.networks) {
       for (let page = 1; page <= 10; page++) {
-        const url = `${this.geckoTerminalP1BaseUrl}/${network}/pools?page=${page}&sort=-6h_trend_score`;
+        const url = `${this.geckoTerminalV2BaseUrl}/networks/${network}/trending_pools?page=${page}`;
 
-        const response = await this.fetchP1(url);
+        const response = await this.fetchV2(url);
         if (!response) continue;
 
         const pools: any[] = response.data?.data ?? [];
@@ -297,7 +306,10 @@ export class VolumeMonitorService implements OnModuleInit, OnModuleDestroy {
           const address: string = attr.address ?? attr.api_address ?? '';
           const name: string = attr.name ?? 'Unknown';
           const h24 = parseFloat(
-            attr.from_volume_in_usd ?? attr.to_volume_in_usd ?? '0',
+            attr.volume_usd?.h24 ??
+              attr.from_volume_in_usd ??
+              attr.to_volume_in_usd ??
+              '0',
           );
           const poolId: string = pool.id ?? '';
           const pairId: string =
@@ -389,12 +401,7 @@ export class VolumeMonitorService implements OnModuleInit, OnModuleDestroy {
               } = doc;
               if (this.isBlockedPool(name)) return;
 
-              const ohlcvData = await this.fetchOhlcvP1(
-                network,
-                address,
-                poolId,
-                pairId,
-              );
+              const ohlcvData = await this.fetchOhlcvV2(network, address);
               if (!ohlcvData) return;
 
               const todayVolume = ohlcvData.todayVolume;
@@ -451,9 +458,7 @@ export class VolumeMonitorService implements OnModuleInit, OnModuleDestroy {
           );
 
           const pendingPools = Math.max(0, totalPools - checked);
-          const elapsedSecs = ((Date.now() - cycleStartTime) / 1000).toFixed(
-            1,
-          );
+          const elapsedSecs = ((Date.now() - cycleStartTime) / 1000).toFixed(1);
 
           // Log progress every 100 pools or at the final batch
           if (checked % 100 === 0 || batchIndex === totalBatches) {
@@ -572,7 +577,7 @@ export class VolumeMonitorService implements OnModuleInit, OnModuleDestroy {
     const chatId_1 = process.env.TELEGRAM_CHAT_ID_1 ?? '';
 
     try {
-      this.telegramService.sendMessage(chatId_1, msg);
+      // this.telegramService.sendMessage(chatId_1, msg);
       this.telegramService.sendMessage(chatId, msg);
     } catch (error) {
       this.logger.warn(`User yet to chat the bot`);
@@ -628,32 +633,22 @@ export class VolumeMonitorService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
-   * Fetch a URL from app.geckoterminal.com p1 API with 300 req/min rate limit (200ms gap)
+   * Fetch a URL from api.geckoterminal.com v2 API
    */
-  private async fetchP1(url: string, maxRetries = 3): Promise<any | null> {
+  private async fetchV2(url: string, maxRetries = 3): Promise<any | null> {
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
-      const elapsed = Date.now() - this.lastDexScreenerRequestAt;
-      if (elapsed < 200) {
-        await this.delay(200 - elapsed);
+      const elapsed = Date.now() - this.lastRequestAt;
+      if (elapsed < 100) {
+        await this.delay(100 - elapsed);
       }
-      this.lastDexScreenerRequestAt = Date.now();
+      this.lastRequestAt = Date.now();
 
       try {
         const reqConfig: any = {
           headers: {
+            Accept: 'application/json',
             'User-Agent':
               'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
-            Accept: 'application/json, text/plain, */*',
-            'Accept-Language': 'en-US,en;q=0.9',
-            Origin: 'https://www.geckoterminal.com',
-            Referer: 'https://www.geckoterminal.com/',
-            'Sec-Ch-Ua':
-              '"Not/A)Brand";v="8", "Chromium";v="126", "Google Chrome";v="126"',
-            'Sec-Ch-Ua-Mobile': '?0',
-            'Sec-Ch-Ua-Platform': '"macOS"',
-            'Sec-Fetch-Dest': 'empty',
-            'Sec-Fetch-Mode': 'cors',
-            'Sec-Fetch-Site': 'same-site',
           },
           timeout: 10_000,
         };
@@ -664,24 +659,18 @@ export class VolumeMonitorService implements OnModuleInit, OnModuleDestroy {
           this.proxyIndex++;
           reqConfig.httpsAgent = agent;
           reqConfig.httpAgent = agent;
+          reqConfig.proxy = false;
         }
 
         const response = await axios.get(url, reqConfig);
         return response;
       } catch (err: any) {
-        if (err.response?.status === 429 || err.response?.status === 402) {
+        if (err.response?.status === 429) {
           if (attempt >= maxRetries) return null;
-          await this.delay(3000 * (attempt + 1));
+          await this.delay(2000 * (attempt + 1));
           continue;
         }
-        if (err.response?.status === 403) {
-          this.logger.error(
-            `403 Forbidden on ${url} — Cloudflare WAF blocked VPS IP.`,
-          );
-          await this.notifyCloudflareBlock(url);
-          return null;
-        }
-        this.logger.warn(`p1 API HTTP error: ${err.message}`);
+        this.logger.warn(`v2 API HTTP error: ${err.message}`);
         return null;
       }
     }
@@ -689,43 +678,38 @@ export class VolumeMonitorService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
-   * Fetch 1D candlesticks from app.geckoterminal.com p1 API
+   * Fetch 1D candlesticks from api.geckoterminal.com v2 API
    */
-  private async fetchOhlcvP1(
+  private async fetchOhlcvV2(
     network: string,
     address: string,
-    poolId?: string,
-    pairId?: string,
   ): Promise<{ todayVolume: number; yesterdayVolume: number } | null> {
     try {
-      let activePoolId = poolId;
-      let activePairId = pairId;
-
-      if (!activePoolId || !activePairId) {
-        const detailsUrl = `${this.geckoTerminalP1BaseUrl}/${network}/pools/${address}`;
-        const res = await this.fetchP1(detailsUrl);
-        if (!res?.data?.data) return null;
-
-        activePoolId = res.data.data.id;
-        activePairId =
-          res.data.data.relationships?.pairs?.data?.[0]?.id ||
-          res.data.data.relationships?.pair?.data?.id;
-      }
-
-      if (!activePoolId || !activePairId) return null;
-
-      const now = Math.floor(Date.now() / 1000);
       let daysToFetch = 3;
       if (this.spikeMode === 'weekly') daysToFetch = 15;
       if (this.spikeMode === 'monthly') daysToFetch = 60;
 
-      const fromTs = now - daysToFetch * 86400;
-      const candleUrl = `${this.geckoTerminalP1BaseUrl}/candlesticks/${activePoolId}/${activePairId}?resolution=1D&from_timestamp=${fromTs}&to_timestamp=${now}`;
+      const candleUrl = `${this.geckoTerminalV2BaseUrl}/networks/${network}/pools/${address}/ohlcv/day?aggregate=1&limit=${daysToFetch}`;
 
-      const resCandles = await this.fetchP1(candleUrl);
-      const candles: any[] = resCandles?.data?.data ?? [];
+      const resCandles = await this.fetchV2(candleUrl);
+      const rawList: any[] =
+        resCandles?.data?.data?.attributes?.ohlcv_list ?? [];
 
-      if (!candles || candles.length === 0) return null;
+      if (!rawList || rawList.length === 0) return null;
+
+      // Sort ascending by timestamp (oldest first)
+      const candles = rawList
+        .map((c) => ({
+          ts: Number(c[0]),
+          open: Number(c[1]),
+          high: Number(c[2]),
+          low: Number(c[3]),
+          close: Number(c[4]),
+          v: Number(c[5]) || 0,
+        }))
+        .sort((a, b) => a.ts - b.ts);
+
+      if (candles.length === 0) return null;
 
       let todayVolume = 0;
       let yesterdayVolume = 0;
@@ -742,58 +726,48 @@ export class VolumeMonitorService implements OnModuleInit, OnModuleDestroy {
           -(daysSinceMonday + 1),
         );
 
-        todayVolume = currentWeekCandles.reduce(
-          (sum, c) => sum + (Number(c.v) || 0),
-          0,
-        );
-        yesterdayVolume = prevWeekCandles.reduce(
-          (sum, c) => sum + (Number(c.v) || 0),
-          0,
-        );
+        todayVolume = currentWeekCandles.reduce((sum, c) => sum + c.v, 0);
+        yesterdayVolume = prevWeekCandles.reduce((sum, c) => sum + c.v, 0);
       } else if (this.spikeMode === 'monthly') {
         const todayDate = new Date();
         const currentMonth = todayDate.getUTCMonth();
         const currentYear = todayDate.getUTCFullYear();
 
+        let prevMonth = currentMonth - 1;
+        let prevYear = currentYear;
+        if (prevMonth < 0) {
+          prevMonth = 11;
+          prevYear -= 1;
+        }
+
         const currentMonthCandles = candles.filter((c) => {
-          const d = new Date(c.dt);
+          const d = new Date(c.ts * 1000);
           return (
             d.getUTCMonth() === currentMonth &&
             d.getUTCFullYear() === currentYear
           );
         });
 
-        const prevMonthIndex = currentMonth === 0 ? 11 : currentMonth - 1;
-        const prevMonthYear =
-          currentMonth === 0 ? currentYear - 1 : currentYear;
-
         const prevMonthCandles = candles.filter((c) => {
-          const d = new Date(c.dt);
+          const d = new Date(c.ts * 1000);
           return (
-            d.getUTCMonth() === prevMonthIndex &&
-            d.getUTCFullYear() === prevMonthYear
+            d.getUTCMonth() === prevMonth && d.getUTCFullYear() === prevYear
           );
         });
 
-        todayVolume = currentMonthCandles.reduce(
-          (sum, c) => sum + (Number(c.v) || 0),
-          0,
-        );
-        yesterdayVolume = prevMonthCandles.reduce(
-          (sum, c) => sum + (Number(c.v) || 0),
-          0,
-        );
+        todayVolume = currentMonthCandles.reduce((sum, c) => sum + c.v, 0);
+        yesterdayVolume = prevMonthCandles.reduce((sum, c) => sum + c.v, 0);
       } else {
         const todayCandle = candles[candles.length - 1];
         const yesterdayCandle =
           candles.length >= 2 ? candles[candles.length - 2] : todayCandle;
-        todayVolume = Number(todayCandle?.v) || 0;
-        yesterdayVolume = Number(yesterdayCandle?.v) || 0;
+        todayVolume = todayCandle?.v ?? 0;
+        yesterdayVolume = yesterdayCandle?.v ?? 0;
       }
 
       return { todayVolume, yesterdayVolume };
     } catch (err: any) {
-      this.logger.warn(`p1 OHLCV fetch error for ${address}: ${err.message}`);
+      this.logger.warn(`v2 OHLCV fetch error for ${address}: ${err.message}`);
       return null;
     }
   }
@@ -868,7 +842,17 @@ export class VolumeMonitorService implements OnModuleInit, OnModuleDestroy {
       this.lastDexScreenerRequestAt = Date.now();
 
       try {
-        const response = await axios.get(url, { timeout: 10_000 });
+        const reqConfig: any = { timeout: 10_000 };
+        if (this.proxyAgents.length > 0) {
+          const agent =
+            this.proxyAgents[this.proxyIndex % this.proxyAgents.length];
+          this.proxyIndex++;
+          reqConfig.httpsAgent = agent;
+          reqConfig.httpAgent = agent;
+          reqConfig.proxy = false;
+        }
+
+        const response = await axios.get(url, reqConfig);
         return response;
       } catch (err: any) {
         if (err.response?.status === 429) {
