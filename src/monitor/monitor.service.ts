@@ -577,7 +577,7 @@ export class VolumeMonitorService implements OnModuleInit, OnModuleDestroy {
     const chatId_1 = process.env.TELEGRAM_CHAT_ID_1 ?? '';
 
     try {
-      // this.telegramService.sendMessage(chatId_1, msg);
+      this.telegramService.sendMessage(chatId_1, msg);
       this.telegramService.sendMessage(chatId, msg);
     } catch (error) {
       this.logger.warn(`User yet to chat the bot`);
