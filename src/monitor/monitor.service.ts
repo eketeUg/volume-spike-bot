@@ -407,9 +407,9 @@ export class VolumeMonitorService implements OnModuleInit, OnModuleDestroy {
               const todayVolume = ohlcvData.todayVolume;
               const yesterdayVolume = ohlcvData.yesterdayVolume;
 
-              // Require genuine previous period volume (skip newly launched tokens with 0 previous volume)
               const effectiveBaseline = yesterdayVolume;
-              if (effectiveBaseline <= 0 || todayVolume <= 0) return;
+              // Filter out if rounded baseline volume is 0 (e.g. $0.29, $0.49, $0.00)
+              if (Math.round(effectiveBaseline) <= 0 || todayVolume <= 0) return;
 
               const spike = todayVolume / effectiveBaseline;
 
