@@ -10,6 +10,7 @@ import { TelegramService } from '../telegram/telegram.service';
 import { PoolBaselineRepository } from '../database/pool-baseline.repository';
 import { PoolBaselineDocument } from '../database/schemas/pool-baseline.schema';
 import axios from 'axios';
+import { HttpsProxyAgent } from 'https-proxy-agent';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -54,6 +55,9 @@ export class VolumeMonitorService implements OnModuleInit, OnModuleDestroy {
 
   // Track single Cloudflare block admin alert flag
   private hasNotifiedCloudflareBlock = false;
+
+  // HTTP Proxy Agent for Cloudflare bypass on VPS
+  private proxyAgent: HttpsProxyAgent<string> | null = null;
 
   // Rate-limit guard — GeckoTerminal free tier: 30 req/min
   private lastRequestAt = 0;
@@ -112,6 +116,14 @@ export class VolumeMonitorService implements OnModuleInit, OnModuleDestroy {
   // ─── Lifecycle ──────────────────────────────────────────────────────────────
 
   onModuleInit() {
+    const proxyUrl = this.configService.get<string>('HTTP_PROXY');
+    if (proxyUrl) {
+      this.proxyAgent = new HttpsProxyAgent(proxyUrl);
+      this.logger.log(
+        `🌐 HTTP Proxy configured: ${proxyUrl.replace(/:[^:@]+@/, ':****@')}`,
+      );
+    }
+
     this.geckoTerminalP1BaseUrl = this.configService.get<string>(
       'GECKOTERMINAL_P1_BASE_URL',
       'https://app.geckoterminal.com/api/p1',
@@ -587,7 +599,7 @@ export class VolumeMonitorService implements OnModuleInit, OnModuleDestroy {
       this.lastDexScreenerRequestAt = Date.now();
 
       try {
-        const response = await axios.get(url, {
+        const reqConfig: any = {
           headers: {
             'User-Agent':
               'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
@@ -604,7 +616,14 @@ export class VolumeMonitorService implements OnModuleInit, OnModuleDestroy {
             'Sec-Fetch-Site': 'same-site',
           },
           timeout: 10_000,
-        });
+        };
+
+        if (this.proxyAgent) {
+          reqConfig.httpsAgent = this.proxyAgent;
+          reqConfig.httpAgent = this.proxyAgent;
+        }
+
+        const response = await axios.get(url, reqConfig);
         return response;
       } catch (err: any) {
         if (err.response?.status === 429) {
