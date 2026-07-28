@@ -266,7 +266,6 @@ export class VolumeMonitorService implements OnModuleInit, OnModuleDestroy {
    * Scans live top trending pools from app.geckoterminal.com p1 API (-6h_trend_score) with 300 req/min limit.
    * Upserts new and existing trending pools into MongoDB without touching alertedAt timestamps.
    */
-  @Cron('*/10 * * * *', { name: 'trending-harvester' })
   async harvestTrendingPools(): Promise<void> {
     this.logger.log(
       '🌾 [Harvester] Scanning live top trending pools from app.geckoterminal.com p1 API (-6h_trend_score)...',
