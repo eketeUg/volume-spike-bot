@@ -362,8 +362,8 @@ export class VolumeMonitorService implements OnModuleInit, OnModuleDestroy {
 
         this.logger.log(
           `🔄 [Worker Cycle Started] Total Pools: ${totalPools} | ` +
-            `Batches: ${totalBatches} (${this.workerBatchSize} pools/batch) | ` +
-            `Est. Duration: ~${Math.ceil(totalBatches * 2.5)}s`,
+            `Batch Size: ${this.workerBatchSize} | ` +
+            `Est. Duration: ~${Math.ceil(totalPools * 0.25)}s`,
         );
         let checked = 0;
         let alerted = 0;
@@ -377,6 +377,7 @@ export class VolumeMonitorService implements OnModuleInit, OnModuleDestroy {
 
           await Promise.all(
             chunk.map(async (doc) => {
+              checked++;
               const {
                 address,
                 network,
@@ -395,7 +396,6 @@ export class VolumeMonitorService implements OnModuleInit, OnModuleDestroy {
                 pairId,
               );
               if (!ohlcvData) return;
-              checked++;
 
               const todayVolume = ohlcvData.todayVolume;
               const yesterdayVolume = ohlcvData.yesterdayVolume;
@@ -455,13 +455,18 @@ export class VolumeMonitorService implements OnModuleInit, OnModuleDestroy {
             1,
           );
 
-          this.logger.log(
-            `⚙️ [Worker Batch ${batchIndex}/${totalBatches}] Checked: ${checked}/${totalPools} (${pendingPools} pending) | ` +
-              `Elapsed: ${elapsedSecs}s | Alerts: ${alerted}`,
-          );
+          // Log progress every 100 pools or at the final batch
+          if (checked % 100 === 0 || batchIndex === totalBatches) {
+            this.logger.log(
+              `⚙️ [Worker Progress] Checked: ${checked}/${totalPools} (${pendingPools} pending) | ` +
+                `Elapsed: ${elapsedSecs}s | Alerts: ${alerted}`,
+            );
+          }
 
-          // 2-second rate limit safety gap between 20-parallel batches
-          await this.delay(2000);
+          // Safety gap between multi-item parallel batches only
+          if (this.workerBatchSize > 1) {
+            await this.delay(2000);
+          }
         }
 
         const totalCycleTimeSecs = (
